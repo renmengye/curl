@@ -35,6 +35,8 @@ def set_seed_everywhere(seed):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
     np.random.seed(seed)
     random.seed(seed)
 
@@ -133,8 +135,10 @@ class ReplayBuffer(Dataset):
         next_obses = self.next_obses[idxs]
         pos = obses.copy()
 
-        obses = random_crop(obses, self.image_size)
-        next_obses = random_crop(next_obses, self.image_size)
+        # Instead of augmenting both anchor and positives, only augment positives
+        # For anchor, use center crop
+        obses = center_crop_image(obses, self.image_size)
+        next_obses = center_crop_image(next_obses, self.image_size)
         pos = random_crop(pos, self.image_size)
 
         obses = torch.as_tensor(obses, device=self.device).float()
@@ -251,11 +255,16 @@ def random_crop(imgs, output_size):
 
 
 def center_crop_image(image, output_size):
-    h, w = image.shape[1:]
     new_h, new_w = output_size, output_size
-
+    h, w = image.shape[-2:]
     top = (h - new_h) // 2
     left = (w - new_w) // 2
 
-    image = image[:, top : top + new_h, left : left + new_w]
+    if len(image.shape) == 3:
+        image = image[:, top : top + new_h, left : left + new_w]
+    elif len(image.shape) == 4:
+        image = image[:, :, top : top + new_h, left : left + new_w]
+    else:
+        raise ValueError("Unknown image dimensions")
+
     return image

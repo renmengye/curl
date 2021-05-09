@@ -23,15 +23,20 @@ class PrototypeMemory(nn.Module):
         # TODO: Change this to an agument
         self.decay = 0.995
         self.prototypes = None  # [n_prototypes x d]
-        self.usages = None  # [n_prototypes]
+        self.usages = None  # [n_prototypes x 1]
         self.beta = nn.Parameter(
             torch.tensor(
-                [0.0], dtype=torch.float32, device=self.device, requires_grad=True
+                [-12.0], dtype=torch.float32, device=self.device, requires_grad=True
             )
         )
         self.gamma = nn.Parameter(
             torch.tensor(
                 [1.0], dtype=torch.float32, device=self.device, requires_grad=True
+            )
+        )
+        self.temp = nn.Parameter(
+            torch.tensor(
+                [10.0], dtype=torch.float32, device=self.device, requires_grad=True
             )
         )
         self.cross_entropy = nn.CrossEntropyLoss()
@@ -43,52 +48,80 @@ class PrototypeMemory(nn.Module):
     def forward(self, z):
         # z: [1, d]
         # If no prototypes exist, automatically add
+        first_proto = False
         if self.prototypes is None:
             self.prototypes = z.clone()
-            self.usages = np.array([1.0], dtype=np.float32)
+            self.usages = torch.tensor(
+                [[1.0]], dtype=torch.float32, device=self.device, requires_grad=False
+            )
+            first_proto = True
 
-        dist = ((self.prototypes - z) ** 2).sum(dim=1).view(1, self.prototypes.size(0))
-        u = torch.sigmoid((torch.min(dist) - self.beta) / self.gamma)
+        logits = self.compute_logits(z)
+        u = torch.sigmoid((-torch.max(logits).detach() - self.beta) / self.gamma)
+
+        if first_proto:
+            label = torch.argmax(logits, dim=1)
+            return self.cross_entropy(logits, label), label, u
 
         # Add new prototype
         if u >= self.thresh:
             assert self.prototypes.size(0) <= self.capacity
             if self.prototypes.size(0) == self.capacity:
-                idx = np.argmin(self.usages)
-                self.prototypes[idx] = z
-                self.usages[idx] = 1.0
-            else:
-                self.prototypes = torch.cat([self.prototypes, z], dim=0)
-                self.usages = np.concatenate(
-                    (self.usages, np.array([1.0], dtype=np.float32))
+                idx = torch.argmin(self.usages, dim=0)
+                self.prototypes = torch.cat(
+                    [self.prototypes[:idx], self.prototypes[idx + 1 :], z.clone()],
+                    dim=0,
                 )
-        # Update existing prototype
+                self.usages = torch.cat(
+                    [
+                        self.usages[:idx],
+                        self.usages[idx + 1 :],
+                        torch.tensor(
+                            [[1.0]],
+                            dtype=torch.float32,
+                            device=self.device,
+                            requires_grad=False,
+                        ),
+                    ],
+                    dim=0,
+                )
+                self.usages[idx, 0] = 1.0
+            else:
+                self.prototypes = torch.cat([self.prototypes, z.clone()], dim=0)
+                self.usages = torch.cat(
+                    [
+                        self.usages,
+                        torch.tensor(
+                            [[1.0]],
+                            dtype=torch.float32,
+                            device=self.device,
+                            requires_grad=False,
+                        ),
+                    ],
+                    dim=0,
+                )
+        # Dense update to existing prototypes
         else:
-            logits = -dist
-            # Scale logits by constant for numerical stability
-            logits = logits - torch.max(logits, dim=1)[0].view(-1, 1)
             y = F.softmax(logits, dim=1)
-            max_y, idx = torch.max(y, dim=1)
-            delta = max_y * (1.0 - u)
-            self.prototypes[idx] = z * (
-                delta / (delta + self.usages[idx])
-            ) + self.prototypes[idx] * (self.usages[idx] / (self.usages[idx] + delta))
-            self.usages[idx] = self.usages[idx] + delta
+            delta = torch.transpose(y * (1.0 - u), 0, 1)
+            self.prototypes = z * (delta / (delta + self.usages)) + self.prototypes * (
+                self.usages / (self.usages + delta)
+            )
+            self.usages = self.usages + delta
 
         # Decay all prototype usages
         self.usages = self.usages * self.decay
 
-        logits = (
-            -((self.prototypes - z) ** 2).sum(dim=1).view(1, self.prototypes.size(0))
-        )
+        logits = self.compute_logits(z)
         label = torch.argmax(logits, dim=1)
         return self.cross_entropy(logits, label), label, u
 
     def compute_logits(self, z):
-        logits = (
-            -((self.prototypes - z) ** 2).sum(dim=1).view(1, self.prototypes.size(0))
+        prototypes = self.prototypes / torch.norm(
+            self.prototypes, p=2, dim=1, keepdim=True
         )
-        return logits - torch.max(logits, dim=1)[0].view(-1, 1)
+        z = z / torch.norm(z, p=2, dim=1, keepdim=True)
+        return self.temp * torch.matmul(z, torch.transpose(prototypes, 0, 1))
 
 
 class CURL(nn.Module):
@@ -262,7 +295,7 @@ class CurlOUPNAgent(object):
                 self.critic.encoder.parameters(), lr=encoder_lr
             )
 
-            self.prototype_mem_optimizer = torch.optim.Adam(
+            self.oupn_optimizer = torch.optim.Adam(
                 self.CURL.prototype_memory.parameters(), lr=encoder_lr
             )
         self.cross_entropy = nn.CrossEntropyLoss()
@@ -379,14 +412,13 @@ class CurlOUPNAgent(object):
 
         l_ent = l_ent / T
         l_con = l_con / T
-        l = self.lambda_ent * l_ent + self.lambda_con * l_con
         l_new = torch.abs((running_u / T) - self.CURL.prototype_memory.thresh)
+        l = self.lambda_ent * l_ent + self.lambda_con * l_con + l_new
 
-        self.prototype_mem_optimizer.zero_grad()
+        self.oupn_optimizer.zero_grad()
         self.encoder_optimizer.zero_grad()
-        l_new.backward(retain_graph=True)
         l.backward()
-        self.prototype_mem_optimizer.step()
+        self.oupn_optimizer.step()
         self.encoder_optimizer.step()
         self.CURL.prototype_memory.reset()
 

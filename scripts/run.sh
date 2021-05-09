@@ -3,10 +3,10 @@ CUDA_VISIBLE_DEVICES=0 python train.py \
     --task_name swingup \
     --encoder_type pixel \
     --action_repeat 8 \
-    --proto_mem_capacity 128 \
+    --proto_mem_capacity 64 \
     --lambda_ent 1.0 \
     --lambda_con 1.0 \
     --save_tb --pre_transform_image_size 100 --image_size 84 \
     --work_dir ./tmp/cartpole \
     --agent curl_oupn --frame_stack 3 \
-    --seed -1 --critic_lr 1e-3 --actor_lr 1e-3 --eval_freq 10000 --batch_size 128 --num_train_steps 1000000 
+    --seed 1234 --critic_lr 1e-3 --actor_lr 1e-3 --eval_freq 10000 --batch_size 128 --num_train_steps 1000000 
