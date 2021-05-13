@@ -80,12 +80,14 @@ class ReplayBuffer(Dataset):
         device,
         image_size=84,
         transform=None,
+        center_crop_anchor=True,
     ):
         self.capacity = capacity
         self.batch_size = batch_size
         self.device = device
         self.image_size = image_size
         self.transform = transform
+        self.center_crop_anchor = center_crop_anchor
         # the proprioceptive obs is stored as float32, pixels obs as uint8
         obs_dtype = np.float32 if len(obs_shape) == 1 else np.uint8
 
@@ -96,56 +98,69 @@ class ReplayBuffer(Dataset):
         self.not_dones = np.empty((capacity, 1), dtype=np.float32)
 
         self.idx = 0
-        self.last_save = 0
         self.full = False
 
     def add(self, obs, action, reward, next_obs, done):
+        if self.full:
+            self.obses[0:-1] = self.obses[1:]
+            self.actions[0:-1] = self.actions[1:]
+            self.rewards[0:-1] = self.rewards[1:]
+            self.next_obses[0:-1] = self.next_obses[1:]
+            self.not_dones[0:-1] = self.not_dones[1:]
 
-        np.copyto(self.obses[self.idx], obs)
-        np.copyto(self.actions[self.idx], action)
-        np.copyto(self.rewards[self.idx], reward)
-        np.copyto(self.next_obses[self.idx], next_obs)
-        np.copyto(self.not_dones[self.idx], not done)
+            np.copyto(self.obses[-1], obs)
+            np.copyto(self.actions[-1], action)
+            np.copyto(self.rewards[-1], reward)
+            np.copyto(self.next_obses[-1], next_obs)
+            np.copyto(self.not_dones[-1], not done)
+        else:
+            np.copyto(self.obses[self.idx], obs)
+            np.copyto(self.actions[self.idx], action)
+            np.copyto(self.rewards[self.idx], reward)
+            np.copyto(self.next_obses[self.idx], next_obs)
+            np.copyto(self.not_dones[self.idx], not done)
 
-        self.idx = (self.idx + 1) % self.capacity
-        self.full = self.full or self.idx == 0
+            self.idx = (self.idx + 1) % self.capacity
+            self.full = self.full or self.idx == 0
 
     def sample_proprio(self):
-        idxs = np.random.randint(
-            0, self.capacity if self.full else self.idx, size=self.batch_size
-        )
-
-        obses = self.obses[idxs]
-        next_obses = self.next_obses[idxs]
+        # idxs = np.random.randint(
+        #     0, self.capacity if self.full else self.idx, size=self.batch_size
+        # )
+        obses = self.obses
+        next_obses = self.next_obses
 
         obses = torch.as_tensor(obses, device=self.device).float()
-        actions = torch.as_tensor(self.actions[idxs], device=self.device)
-        rewards = torch.as_tensor(self.rewards[idxs], device=self.device)
+        actions = torch.as_tensor(self.actions, device=self.device)
+        rewards = torch.as_tensor(self.rewards, device=self.device)
         next_obses = torch.as_tensor(next_obses, device=self.device).float()
-        not_dones = torch.as_tensor(self.not_dones[idxs], device=self.device)
+        not_dones = torch.as_tensor(self.not_dones, device=self.device)
         return obses, actions, rewards, next_obses, not_dones
 
     def sample_cpc(self):
         start = time.time()
-        idxs = np.random.randint(
-            0, self.capacity if self.full else self.idx, size=self.batch_size
-        )
-
-        obses = self.obses[idxs]
-        next_obses = self.next_obses[idxs]
+        # idxs = np.random.randint(
+        #     0, self.capacity if self.full else self.idx, size=self.batch_size
+        # )
+        obses = self.obses
+        next_obses = self.next_obses
         pos = obses.copy()
 
         # Instead of augmenting both anchor and positives, only augment positives
         # For anchor, use center crop
-        obses = center_crop_image(obses, self.image_size)
-        next_obses = center_crop_image(next_obses, self.image_size)
+        if self.center_crop_anchor:
+            obses = center_crop_image(obses, self.image_size)
+            next_obses = center_crop_image(next_obses, self.image_size)
+        else:
+            obses = random_crop(obses, self.image_size)
+            next_obses = random_crop(next_obses, self.image_size)
         pos = random_crop(pos, self.image_size)
 
         obses = torch.as_tensor(obses, device=self.device).float()
         next_obses = torch.as_tensor(next_obses, device=self.device).float()
-        actions = torch.as_tensor(self.actions[idxs], device=self.device)
-        rewards = torch.as_tensor(self.rewards[idxs], device=self.device)
-        not_dones = torch.as_tensor(self.not_dones[idxs], device=self.device)
+        actions = torch.as_tensor(self.actions, device=self.device)
+        rewards = torch.as_tensor(self.rewards, device=self.device)
+        not_dones = torch.as_tensor(self.not_dones, device=self.device)
 
         pos = torch.as_tensor(pos, device=self.device).float()
         cpc_kwargs = dict(
@@ -154,49 +169,21 @@ class ReplayBuffer(Dataset):
 
         return obses, actions, rewards, next_obses, not_dones, cpc_kwargs
 
-    def save(self, save_dir):
-        if self.idx == self.last_save:
-            return
-        path = os.path.join(save_dir, "%d_%d.pt" % (self.last_save, self.idx))
-        payload = [
-            self.obses[self.last_save : self.idx],
-            self.next_obses[self.last_save : self.idx],
-            self.actions[self.last_save : self.idx],
-            self.rewards[self.last_save : self.idx],
-            self.not_dones[self.last_save : self.idx],
-        ]
-        self.last_save = self.idx
-        torch.save(payload, path)
-
-    def load(self, save_dir):
-        chunks = os.listdir(save_dir)
-        chucks = sorted(chunks, key=lambda x: int(x.split("_")[0]))
-        for chunk in chucks:
-            start, end = [int(x) for x in chunk.split(".")[0].split("_")]
-            path = os.path.join(save_dir, chunk)
-            payload = torch.load(path)
-            assert self.idx == start
-            self.obses[start:end] = payload[0]
-            self.next_obses[start:end] = payload[1]
-            self.actions[start:end] = payload[2]
-            self.rewards[start:end] = payload[3]
-            self.not_dones[start:end] = payload[4]
-            self.idx = end
-
     def __getitem__(self, idx):
-        idx = np.random.randint(0, self.capacity if self.full else self.idx, size=1)
-        idx = idx[0]
-        obs = self.obses[idx]
-        action = self.actions[idx]
-        reward = self.rewards[idx]
-        next_obs = self.next_obses[idx]
-        not_done = self.not_dones[idx]
+        # idx = np.random.randint(0, self.capacity if self.full else self.idx, size=1)
+        # idx = idx[0]
+        # obs = self.obses[idx]
+        # action = self.actions[idx]
+        # reward = self.rewards[idx]
+        # next_obs = self.next_obses[idx]
+        # not_done = self.not_dones[idx]
 
-        if self.transform:
-            obs = self.transform(obs)
-            next_obs = self.transform(next_obs)
+        # if self.transform:
+        #     obs = self.transform(obs)
+        #     next_obs = self.transform(next_obs)
 
-        return obs, action, reward, next_obs, not_done
+        # return obs, action, reward, next_obs, not_done
+        raise NotImplementedError("__getitem__ in replay buffer should not be used")
 
     def __len__(self):
         return self.capacity

@@ -14,14 +14,12 @@ LOG_FREQ = 10000
 
 class PrototypeMemory(nn.Module):
     # NOTE: Prototype memory assumes the batch size is 1
-    def __init__(self, capacity, device):
+    def __init__(self, capacity, device, thresh, decay):
         super(PrototypeMemory, self).__init__()
         self.capacity = capacity
         self.device = device
-        # TODO: Change this to an argument that may have a schedule
-        self.thresh = 0.5
-        # TODO: Change this to an agument
-        self.decay = 0.995
+        self.thresh = thresh
+        self.decay = decay
         self.prototypes = None  # [n_prototypes x d]
         self.usages = None  # [n_prototypes x 1]
         self.beta = nn.Parameter(
@@ -44,6 +42,10 @@ class PrototypeMemory(nn.Module):
     def reset(self):
         self.prototypes = None
         self.usages = None
+
+    def detach_prototypes(self):
+        self.prototypes = self.prototypes.detach()
+        self.usages = self.usages.detach()
 
     def forward(self, z):
         # z: [1, d]
@@ -85,7 +87,6 @@ class PrototypeMemory(nn.Module):
                     ],
                     dim=0,
                 )
-                self.usages[idx, 0] = 1.0
             else:
                 self.prototypes = torch.cat([self.prototypes, z.clone()], dim=0)
                 self.usages = torch.cat(
@@ -138,13 +139,15 @@ class CURL(nn.Module):
         critic_target,
         device,
         mem_capacity,
+        thresh,
+        decay,
         output_type="continuous",
     ):
         super(CURL, self).__init__()
         self.batch_size = batch_size
         self.encoder = critic.encoder
         self.encoder_target = critic_target.encoder
-        self.prototype_memory = PrototypeMemory(mem_capacity, device)
+        self.prototype_memory = PrototypeMemory(mem_capacity, device, thresh, decay)
         self.output_type = output_type
 
     def encode(self, x, detach=False, ema=False):
@@ -203,8 +206,11 @@ class CurlOUPNAgent(object):
         detach_encoder=False,
         curl_latent_dim=128,
         mem_capacity=128,
-        lambda_ent=1.0,
+        lambda_ent=0.5,
         lambda_con=1.0,
+        lambda_new=0.5,
+        proto_thresh=0.5,
+        usage_decay=0.995,
     ):
         self.device = device
         self.discount = discount
@@ -221,6 +227,9 @@ class CurlOUPNAgent(object):
         self.mem_capacity = mem_capacity
         self.lambda_ent = lambda_ent
         self.lambda_con = lambda_con
+        self.lambda_new = lambda_new
+        self.proto_thresh = proto_thresh
+        self.usage_decay = usage_decay
 
         self.actor = Actor(
             obs_shape,
@@ -287,6 +296,8 @@ class CurlOUPNAgent(object):
                 self.critic_target,
                 self.device,
                 self.mem_capacity,
+                self.proto_thresh,
+                self.usage_decay,
                 output_type="continuous",
             ).to(self.device)
 
@@ -389,7 +400,7 @@ class CurlOUPNAgent(object):
 
     def update_oupn(self, obs_anchor, obs_pos, cpc_kwargs, L, step):
         z_a = self.CURL.encode(obs_anchor)
-        z_pos = self.CURL.encode(obs_pos, ema=True)
+        z_pos = self.CURL.encode(obs_pos)
         T = z_a.size(0)
 
         running_u = torch.zeros(
@@ -413,14 +424,15 @@ class CurlOUPNAgent(object):
         l_ent = l_ent / T
         l_con = l_con / T
         l_new = torch.abs((running_u / T) - self.CURL.prototype_memory.thresh)
-        l = self.lambda_ent * l_ent + self.lambda_con * l_con + l_new
+        l = self.lambda_ent * l_ent + self.lambda_con * l_con + self.lambda_new * l_new
 
         self.oupn_optimizer.zero_grad()
         self.encoder_optimizer.zero_grad()
         l.backward()
         self.oupn_optimizer.step()
         self.encoder_optimizer.step()
-        self.CURL.prototype_memory.reset()
+
+        self.CURL.prototype_memory.detach_prototypes()
 
         if step % self.log_interval == 0:
             L.log("train/curl_loss", l + l_new, step)

@@ -32,11 +32,15 @@ def parse_args():
     parser.add_argument("--frame_stack", default=3, type=int)
     # replay buffer
     parser.add_argument("--replay_buffer_capacity", default=100000, type=int)
+    parser.add_argument("--center_crop_anchor", default=False, action="store_true")
     # prototype memory capacity
     parser.add_argument("--proto_mem_capacity", default=128, type=int)
+    parser.add_argument("--proto_thresh", default=0.5, type=float)
+    parser.add_argument("--usage_decay", default=0.995, type=float)
     # oupn
     parser.add_argument("--lambda_ent", default=0.5, type=float)
     parser.add_argument("--lambda_con", default=1.0, type=float)
+    parser.add_argument("--lambda_new", default=0.5, type=float)
     # train
     parser.add_argument("--agent", default="curl_oupn", type=str)
     parser.add_argument("--init_steps", default=1000, type=int)
@@ -76,7 +80,6 @@ def parse_args():
     parser.add_argument("--seed", default=1, type=int)
     parser.add_argument("--work_dir", default=".", type=str)
     parser.add_argument("--save_tb", default=False, action="store_true")
-    parser.add_argument("--save_buffer", default=False, action="store_true")
     parser.add_argument("--save_video", default=False, action="store_true")
     parser.add_argument("--save_model", default=False, action="store_true")
     parser.add_argument("--detach_encoder", default=False, action="store_true")
@@ -156,6 +159,9 @@ def make_agent(obs_shape, action_shape, args, device):
             mem_capacity=args.proto_mem_capacity,
             lambda_ent=args.lambda_ent,
             lambda_con=args.lambda_con,
+            lambda_new=args.lambda_new,
+            proto_thresh=args.proto_thresh,
+            usage_decay=args.usage_decay,
         )
     elif args.agent == "curl_sac":
         return CurlSacAgent(
@@ -194,6 +200,10 @@ def main():
     args = parse_args()
     if args.seed == -1:
         args.__dict__["seed"] = np.random.randint(1, 1000000)
+    assert (
+        args.init_steps == args.batch_size
+        and args.num_train_steps * args.action_repeat in [100000, 500000]
+    )
     utils.set_seed_everywhere(args.seed)
     env = dmc2gym.make(
         domain_name=args.domain_name,
@@ -224,6 +234,8 @@ def main():
         + str(args.image_size)
         + "-b"
         + str(args.batch_size)
+        + "-nts"
+        + str(args.num_train_steps)
         + "-s"
         + str(args.seed)
         + "-"
@@ -261,10 +273,12 @@ def main():
     replay_buffer = utils.ReplayBuffer(
         obs_shape=pre_aug_obs_shape,
         action_shape=action_shape,
-        capacity=args.replay_buffer_capacity,
+        # capacity=args.replay_buffer_capacity,
+        capacity=args.batch_size,
         batch_size=args.batch_size,
         device=device,
         image_size=args.image_size,
+        center_crop_anchor=args.center_crop_anchor,
     )
 
     agent = make_agent(
@@ -284,17 +298,14 @@ def main():
             evaluate(env, agent, video, args.num_eval_episodes, L, step, args)
             if args.save_model:
                 agent.save_curl(model_dir, step)
-            if args.save_buffer:
-                replay_buffer.save(buffer_dir)
 
         if done:
             if step > 0:
                 if step % args.log_interval == 0:
                     L.log("train/duration", time.time() - start_time, step)
+                    L.log("train/episode_reward", episode_reward, step)
                     L.dump(step)
                 start_time = time.time()
-            if step % args.log_interval == 0:
-                L.log("train/episode_reward", episode_reward, step)
 
             obs = env.reset()
             done = False
@@ -319,7 +330,7 @@ def main():
 
         next_obs, reward, done, _ = env.step(action)
 
-        # allow infinit bootstrap
+        # allow infinite bootstrap
         done_bool = 0 if episode_step + 1 == env._max_episode_steps else float(done)
         episode_reward += reward
         replay_buffer.add(obs, action, reward, next_obs, done_bool)
