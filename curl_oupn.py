@@ -287,7 +287,6 @@ class CurlOUPNAgent(object):
         )
 
         if self.encoder_type == "pixel":
-            # create CURL encoder (the 128 batch size is probably unnecessary)
             self.CURL = CURL(
                 obs_shape,
                 encoder_feature_dim,

@@ -234,8 +234,8 @@ def main():
         + str(args.image_size)
         + "-b"
         + str(args.batch_size)
-        + "-nts"
-        + str(args.num_train_steps)
+        + "-nes"
+        + str(args.num_train_steps * args.action_repeat)
         + "-s"
         + str(args.seed)
         + "-"
@@ -295,7 +295,8 @@ def main():
 
         if step % args.eval_freq == 0:
             L.log("eval/episode", episode, step)
-            evaluate(env, agent, video, args.num_eval_episodes, L, step, args)
+            with utils.eval_mode(agent):
+                evaluate(env, agent, video, args.num_eval_episodes, L, step, args)
             if args.save_model:
                 agent.save_curl(model_dir, step)
 
@@ -337,6 +338,12 @@ def main():
 
         obs = next_obs
         episode_step += 1
+
+    L.log("eval/episode", episode, step)
+    with utils.eval_mode(agent):
+        evaluate(env, agent, video, args.num_eval_episodes, L, step, args)
+    if args.save_model:
+        agent.save_curl(model_dir, step)
 
 
 if __name__ == "__main__":
