@@ -10,6 +10,7 @@ import time
 import json
 import dmc2gym
 import copy
+from collections import deque
 
 import utils
 from logger import Logger
@@ -289,32 +290,41 @@ def main():
 
     episode, episode_reward, done = 0, 0, True
     start_time = time.time()
+    reward_window = deque([], maxlen=5)
+    best_reward = 0.0
+    best_step = 0
 
     for step in range(args.num_train_steps):
         # evaluate agent periodically
-
-        if step % args.eval_freq == 0:
-            L.log("eval/episode", episode, step)
-            with utils.eval_mode(agent):
-                evaluate(env, agent, video, args.num_eval_episodes, L, step, args)
-            if args.save_model:
-                agent.save_curl(model_dir, step)
+        # if step % args.eval_freq == 0:
+        #     L.log("eval/episode", episode, step)
+        #     with utils.eval_mode(agent):
+        #         evaluate(env, agent, video, args.num_eval_episodes, L, step, args)
+        #     if args.save_model:
+        #         agent.save_curl(model_dir, step)
 
         if done:
             if step > 0:
-                if step % args.log_interval == 0:
-                    L.log("train/duration", time.time() - start_time, step)
-                    L.log("train/episode_reward", episode_reward, step)
-                    L.dump(step)
+                # if step % args.log_interval == 0:
+                L.log("train/duration", time.time() - start_time, step)
+                L.log("train/episode_reward", episode_reward, step)
+                L.dump(step)
                 start_time = time.time()
+            reward_window.append(episode_reward)
+            if len(reward_window) == reward_window.maxlen:
+                mean_reward = np.mean(reward_window)
+                if mean_reward > best_reward:
+                    best_reward = mean_reward
+                    best_step = step
+                    agent.save(model_dir, best_step)
 
             obs = env.reset()
             done = False
             episode_reward = 0
             episode_step = 0
             episode += 1
-            if step % args.log_interval == 0:
-                L.log("train/episode", episode, step)
+            # if step % args.log_interval == 0:
+            L.log("train/episode", episode, step)
 
         # sample action for data collection
         if step < args.init_steps:
@@ -340,13 +350,11 @@ def main():
         episode_step += 1
 
     L.log("eval/episode", episode, step)
+    agent.load(model_dir, best_step)
     with utils.eval_mode(agent):
         evaluate(env, agent, video, args.num_eval_episodes, L, step, args)
-    if args.save_model:
-        agent.save_curl(model_dir, step)
 
 
 if __name__ == "__main__":
     torch.multiprocessing.set_start_method("spawn")
-
     main()

@@ -6,12 +6,14 @@ steps=100000
 # CURL_OUPN #
 #############
 
+actrepeat=8
+let numsteps=steps/actrepeat
 CUDA_VISIBLE_DEVICES=0 python train.py \
     --domain_name cartpole \
     --task_name swingup \
     --encoder_type pixel \
-    --action_repeat 8 \
-    --proto_mem_capacity 300 \
+    --action_repeat $actrepeat \
+    --proto_mem_capacity 32 \
     --lambda_ent 0.5 \
     --lambda_new 0.5 \
     --lambda_con 1.0 \
@@ -19,7 +21,7 @@ CUDA_VISIBLE_DEVICES=0 python train.py \
     --save_tb --save_model --save_video --pre_transform_image_size 100 --image_size 84 \
     --work_dir ./tmp/cartpole \
     --agent curl_oupn --frame_stack 3 \
-    --seed 406565 --critic_lr 1e-3 --actor_lr 1e-3 --eval_freq 12500 --batch_size 128 --num_train_steps 12500 --init_steps 128
+    --seed 406565 --critic_lr 1e-3 --actor_lr 1e-3 --eval_freq $numsteps --batch_size 125 --num_train_steps $numsteps --init_steps 125
 
 ############
 # CURL_SAC #

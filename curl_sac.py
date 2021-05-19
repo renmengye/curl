@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import copy
 import math
+import os
 
 import utils
 from encoder import make_encoder
@@ -425,8 +426,8 @@ class CurlSacAgent(object):
         critic_loss = F.mse_loss(current_Q1, target_Q) + F.mse_loss(
             current_Q2, target_Q
         )
-        if step % self.log_interval == 0:
-            L.log("train_critic/loss", critic_loss, step)
+        # if step % self.log_interval == 0:
+        L.log("train_critic/loss", critic_loss, step)
 
         # Optimize the critic
         self.critic_optimizer.zero_grad()
@@ -443,14 +444,14 @@ class CurlSacAgent(object):
         actor_Q = torch.min(actor_Q1, actor_Q2)
         actor_loss = (self.alpha.detach() * log_pi - actor_Q).mean()
 
-        if step % self.log_interval == 0:
-            L.log("train_actor/loss", actor_loss, step)
-            L.log("train_actor/target_entropy", self.target_entropy, step)
+        # if step % self.log_interval == 0:
+        L.log("train_actor/loss", actor_loss, step)
+        L.log("train_actor/target_entropy", self.target_entropy, step)
         entropy = 0.5 * log_std.shape[1] * (1.0 + np.log(2 * np.pi)) + log_std.sum(
             dim=-1
         )
-        if step % self.log_interval == 0:
-            L.log("train_actor/entropy", entropy.mean(), step)
+        # if step % self.log_interval == 0:
+        L.log("train_actor/entropy", entropy.mean(), step)
 
         # optimize the actor
         self.actor_optimizer.zero_grad()
@@ -461,9 +462,9 @@ class CurlSacAgent(object):
 
         self.log_alpha_optimizer.zero_grad()
         alpha_loss = (self.alpha * (-log_pi - self.target_entropy).detach()).mean()
-        if step % self.log_interval == 0:
-            L.log("train_alpha/loss", alpha_loss, step)
-            L.log("train_alpha/value", self.alpha, step)
+        # if step % self.log_interval == 0:
+        L.log("train_alpha/loss", alpha_loss, step)
+        L.log("train_alpha/value", self.alpha, step)
         alpha_loss.backward()
         self.log_alpha_optimizer.step()
 
@@ -482,8 +483,8 @@ class CurlSacAgent(object):
 
         self.encoder_optimizer.step()
         self.cpc_optimizer.step()
-        if step % self.log_interval == 0:
-            L.log("train/curl_loss", loss, step)
+        # if step % self.log_interval == 0:
+        L.log("train/curl_loss", loss, step)
 
     def update(self, replay_buffer, L, step):
         if self.encoder_type == "pixel":
@@ -498,8 +499,8 @@ class CurlSacAgent(object):
         else:
             obs, action, reward, next_obs, not_done = replay_buffer.sample_proprio()
 
-        if step % self.log_interval == 0:
-            L.log("train/batch_reward", reward.mean(), step)
+        # if step % self.log_interval == 0:
+        L.log("train/batch_reward", reward.mean(), step)
 
         self.update_critic(obs, action, reward, next_obs, not_done, L, step)
 
@@ -522,12 +523,19 @@ class CurlSacAgent(object):
             self.update_cpc(obs_anchor, obs_pos, cpc_kwargs, L, step)
 
     def save(self, model_dir, step):
+        for root, _, files in os.walk(model_dir):
+            for f in files:
+                if (
+                    f.startswith("actor")
+                    or f.startswith("critic")
+                    or f.startswith("curl")
+                ) and f.endswith(".pt"):
+                    os.remove(os.path.join(root, f))
         torch.save(self.actor.state_dict(), "%s/actor_%s.pt" % (model_dir, step))
         torch.save(self.critic.state_dict(), "%s/critic_%s.pt" % (model_dir, step))
-
-    def save_curl(self, model_dir, step):
         torch.save(self.CURL.state_dict(), "%s/curl_%s.pt" % (model_dir, step))
 
     def load(self, model_dir, step):
         self.actor.load_state_dict(torch.load("%s/actor_%s.pt" % (model_dir, step)))
         self.critic.load_state_dict(torch.load("%s/critic_%s.pt" % (model_dir, step)))
+        self.CURL.load_state_dict(torch.load("%s/curl_%s.pt" % (model_dir, step)))

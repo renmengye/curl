@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import copy
 import math
+import os
 
 import utils
 from encoder import make_encoder
@@ -355,8 +356,8 @@ class CurlOUPNAgent(object):
         critic_loss = F.mse_loss(current_Q1, target_Q) + F.mse_loss(
             current_Q2, target_Q
         )
-        if step % self.log_interval == 0:
-            L.log("train_critic/loss", critic_loss, step)
+        # if step % self.log_interval == 0:
+        L.log("train_critic/loss", critic_loss, step)
 
         # Optimize the critic
         self.critic_optimizer.zero_grad()
@@ -373,14 +374,14 @@ class CurlOUPNAgent(object):
         actor_Q = torch.min(actor_Q1, actor_Q2)
         actor_loss = (self.alpha.detach() * log_pi - actor_Q).mean()
 
-        if step % self.log_interval == 0:
-            L.log("train_actor/loss", actor_loss, step)
-            L.log("train_actor/target_entropy", self.target_entropy, step)
+        # if step % self.log_interval == 0:
+        L.log("train_actor/loss", actor_loss, step)
+        L.log("train_actor/target_entropy", self.target_entropy, step)
         entropy = 0.5 * log_std.shape[1] * (1.0 + np.log(2 * np.pi)) + log_std.sum(
             dim=-1
         )
-        if step % self.log_interval == 0:
-            L.log("train_actor/entropy", entropy.mean(), step)
+        # if step % self.log_interval == 0:
+        L.log("train_actor/entropy", entropy.mean(), step)
 
         # optimize the actor
         self.actor_optimizer.zero_grad()
@@ -391,9 +392,9 @@ class CurlOUPNAgent(object):
 
         self.log_alpha_optimizer.zero_grad()
         alpha_loss = (self.alpha * (-log_pi - self.target_entropy).detach()).mean()
-        if step % self.log_interval == 0:
-            L.log("train_alpha/loss", alpha_loss, step)
-            L.log("train_alpha/value", self.alpha, step)
+        # if step % self.log_interval == 0:
+        L.log("train_alpha/loss", alpha_loss, step)
+        L.log("train_alpha/value", self.alpha, step)
         alpha_loss.backward()
         self.log_alpha_optimizer.step()
 
@@ -402,6 +403,7 @@ class CurlOUPNAgent(object):
         z_pos = self.CURL.encode(obs_pos)
         T = z_a.size(0)
 
+        u_vals = []
         running_u = torch.zeros(
             1, dtype=torch.float32, device=self.device, requires_grad=True
         )
@@ -415,15 +417,18 @@ class CurlOUPNAgent(object):
             z_ai = z_a[i]
             l_ent_t, label, u = self.CURL.compute_loss(z_ai.view(1, z_a.size(1)))
             l_ent = l_ent + l_ent_t
+            u_vals.append(u.item())
             running_u = running_u + u
             z_posi = z_pos[i]
             pos_logits = self.CURL.compute_logits(z_posi.view(1, z_pos.size(1)))
             l_con = l_con + self.cross_entropy(pos_logits, label)
 
-        l_ent = l_ent / T
-        l_con = l_con / T
-        l_new = torch.abs((running_u / T) - self.CURL.prototype_memory.thresh)
-        l = self.lambda_ent * l_ent + self.lambda_con * l_con + self.lambda_new * l_new
+        l_ent = self.lambda_ent * (l_ent / T)
+        l_con = self.lambda_con * (l_con / T)
+        l_new = self.lambda_new * (
+            torch.abs((running_u / T) - self.CURL.prototype_memory.thresh)
+        )
+        l = l_ent + l_con + l_new
 
         self.oupn_optimizer.zero_grad()
         self.encoder_optimizer.zero_grad()
@@ -433,8 +438,12 @@ class CurlOUPNAgent(object):
 
         self.CURL.prototype_memory.detach_prototypes()
 
-        if step % self.log_interval == 0:
-            L.log("train/curl_loss", l + l_new, step)
+        # if step % self.log_interval == 0:
+        L.log("train/ent_loss", l_ent, step)
+        L.log("train/con_loss", l_con, step)
+        L.log("train/new_loss", l_new, step)
+        L.log("train/min_new_prob", np.amin(u_vals), step)
+        L.log("train/max_new_prob", np.amax(u_vals), step)
 
     def update(self, replay_buffer, L, step):
         if self.encoder_type == "pixel":
@@ -449,8 +458,8 @@ class CurlOUPNAgent(object):
         else:
             obs, action, reward, next_obs, not_done = replay_buffer.sample_proprio()
 
-        if step % self.log_interval == 0:
-            L.log("train/batch_reward", reward.mean(), step)
+        # if step % self.log_interval == 0:
+        L.log("train/batch_reward", reward.mean(), step)
 
         self.update_critic(obs, action, reward, next_obs, not_done, L, step)
 
@@ -473,12 +482,19 @@ class CurlOUPNAgent(object):
             self.update_oupn(obs_anchor, obs_pos, cpc_kwargs, L, step)
 
     def save(self, model_dir, step):
+        for root, _, files in os.walk(model_dir):
+            for f in files:
+                if (
+                    f.startswith("actor")
+                    or f.startswith("critic")
+                    or f.startswith("curl")
+                ) and f.endswith(".pt"):
+                    os.remove(os.path.join(root, f))
         torch.save(self.actor.state_dict(), "%s/actor_%s.pt" % (model_dir, step))
         torch.save(self.critic.state_dict(), "%s/critic_%s.pt" % (model_dir, step))
-
-    def save_curl(self, model_dir, step):
         torch.save(self.CURL.state_dict(), "%s/curl_%s.pt" % (model_dir, step))
 
     def load(self, model_dir, step):
         self.actor.load_state_dict(torch.load("%s/actor_%s.pt" % (model_dir, step)))
         self.critic.load_state_dict(torch.load("%s/critic_%s.pt" % (model_dir, step)))
+        self.CURL.load_state_dict(torch.load("%s/curl_%s.pt" % (model_dir, step)))
