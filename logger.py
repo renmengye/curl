@@ -24,6 +24,13 @@ FORMAT_CONFIG = {
             ("new_loss", "NEW_LS", "float"),
             ("min_new_prob", "MIN_NEW_P", "float"),
             ("max_new_prob", "MAX_NEW_P", "float"),
+            ("min_usage", "MIN_USAGE", "float"),
+            ("max_usage", "MAX_USAGE", "float"),
+            ("med_usage", "MED_USAGE", "float"),
+            ("cluster_accuracy", "CLUSTER_ACC", "float"),
+            ("num_protos", "NUM_PROTOS", "int"),
+            ("proto_len", "PROTO_LEN", "float"),
+            ("new_protos", "NEW_PROTOS", "int"),
         ],
         "eval": [("step", "S", "int"), ("episode_reward", "ER", "float")],
     }

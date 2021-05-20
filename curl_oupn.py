@@ -15,7 +15,7 @@ LOG_FREQ = 10000
 
 class PrototypeMemory(nn.Module):
     # NOTE: Prototype memory assumes the batch size is 1
-    def __init__(self, capacity, device, thresh, decay):
+    def __init__(self, capacity, device, thresh, decay, z_dim):
         super(PrototypeMemory, self).__init__()
         self.capacity = capacity
         self.device = device
@@ -23,6 +23,8 @@ class PrototypeMemory(nn.Module):
         self.decay = decay
         self.prototypes = None  # [n_prototypes x d]
         self.usages = None  # [n_prototypes x 1]
+        self.proto_len = None
+        self.new_protos = 0
         self.beta = nn.Parameter(
             torch.tensor(
                 [-12.0], dtype=torch.float32, device=self.device, requires_grad=True
@@ -43,10 +45,13 @@ class PrototypeMemory(nn.Module):
     def reset(self):
         self.prototypes = None
         self.usages = None
+        self.proto_len = None
+        self.new_protos = 0
 
     def detach_prototypes(self):
         self.prototypes = self.prototypes.detach()
         self.usages = self.usages.detach()
+        self.new_protos = 0
 
     def forward(self, z):
         # z: [1, d]
@@ -57,17 +62,22 @@ class PrototypeMemory(nn.Module):
             self.usages = torch.tensor(
                 [[1.0]], dtype=torch.float32, device=self.device, requires_grad=False
             )
+            self.proto_len = np.array([0])
+            self.new_protos += 1
             first_proto = True
 
         logits = self.compute_logits(z)
         u = torch.sigmoid((-torch.max(logits).detach() - self.beta) / self.gamma)
+        logits = logits - torch.max(logits, 1)[0][:, None]
 
         if first_proto:
+            self.proto_len += 1
             label = torch.argmax(logits, dim=1)
             return self.cross_entropy(logits, label), label, u
 
         # Add new prototype
         if u >= self.thresh:
+            self.new_protos += 1
             assert self.prototypes.size(0) <= self.capacity
             if self.prototypes.size(0) == self.capacity:
                 idx = torch.argmin(self.usages, dim=0)
@@ -88,6 +98,9 @@ class PrototypeMemory(nn.Module):
                     ],
                     dim=0,
                 )
+                self.proto_len = np.concatenate(
+                    [self.proto_len[:idx], self.proto_len[idx + 1 :], np.array([0])]
+                )
             else:
                 self.prototypes = torch.cat([self.prototypes, z.clone()], dim=0)
                 self.usages = torch.cat(
@@ -102,6 +115,7 @@ class PrototypeMemory(nn.Module):
                     ],
                     dim=0,
                 )
+                self.proto_len = np.concatenate([self.proto_len, np.array([0])])
         # Dense update to existing prototypes
         else:
             y = F.softmax(logits, dim=1)
@@ -113,8 +127,10 @@ class PrototypeMemory(nn.Module):
 
         # Decay all prototype usages
         self.usages = self.usages * self.decay
+        self.proto_len += 1
 
         logits = self.compute_logits(z)
+        logits = logits - torch.max(logits, 1)[0][:, None]
         label = torch.argmax(logits, dim=1)
         return self.cross_entropy(logits, label), label, u
 
@@ -148,7 +164,9 @@ class CURL(nn.Module):
         self.batch_size = batch_size
         self.encoder = critic.encoder
         self.encoder_target = critic_target.encoder
-        self.prototype_memory = PrototypeMemory(mem_capacity, device, thresh, decay)
+        self.prototype_memory = PrototypeMemory(
+            mem_capacity, device, thresh, decay, z_dim
+        )
         self.output_type = output_type
 
     def encode(self, x, detach=False, ema=False):
@@ -403,6 +421,7 @@ class CurlOUPNAgent(object):
         z_pos = self.CURL.encode(obs_pos)
         T = z_a.size(0)
 
+        cluster_correct = []
         u_vals = []
         running_u = torch.zeros(
             1, dtype=torch.float32, device=self.device, requires_grad=True
@@ -422,6 +441,10 @@ class CurlOUPNAgent(object):
             z_posi = z_pos[i]
             pos_logits = self.CURL.compute_logits(z_posi.view(1, z_pos.size(1)))
             l_con = l_con + self.cross_entropy(pos_logits, label)
+            cluster_correct.append(
+                np.argmax(pos_logits.detach().cpu().numpy(), axis=1)[0]
+                == label.detach().cpu().numpy()[0]
+            )
 
         l_ent = self.lambda_ent * (l_ent / T)
         l_con = self.lambda_con * (l_con / T)
@@ -436,6 +459,8 @@ class CurlOUPNAgent(object):
         self.oupn_optimizer.step()
         self.encoder_optimizer.step()
 
+        L.log("train/new_protos", self.CURL.prototype_memory.new_protos, step)
+
         self.CURL.prototype_memory.detach_prototypes()
 
         # if step % self.log_interval == 0:
@@ -444,6 +469,14 @@ class CurlOUPNAgent(object):
         L.log("train/new_loss", l_new, step)
         L.log("train/min_new_prob", np.amin(u_vals), step)
         L.log("train/max_new_prob", np.amax(u_vals), step)
+        L.log("train/cluster_accuracy", np.mean(cluster_correct), step)
+        L.log("train/num_protos", len(self.CURL.prototype_memory.prototypes), step)
+        L.log("train/proto_len", np.mean(self.CURL.prototype_memory.proto_len), step)
+
+        usages = self.CURL.prototype_memory.usages.detach().cpu().numpy()
+        L.log("train/min_usage", np.amin(usages), step)
+        L.log("train/max_usage", np.amax(usages), step)
+        L.log("train/med_usage", np.median(usages), step)
 
     def update(self, replay_buffer, L, step):
         if self.encoder_type == "pixel":
